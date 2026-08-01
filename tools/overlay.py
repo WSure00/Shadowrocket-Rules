@@ -68,6 +68,13 @@ DIRECT_RULESET = (
     f"RULE-SET,https://raw.githubusercontent.com/{FORK_REPO.split('/')[0]}/ProxyResource"
     "/refs/heads/main/Rule/shadowrocket-direct.list,DIRECT"
 )
+
+# 本仓库自带的规则表（论坛本身 + 客户端里配的 DoH 端点，同一个策略）。
+# URL 指向 fork —— 它只存在于这里，上游没有。
+LINUXDO_LIST = "LinuxDo.list"
+LINUXDO_POLICY = "🚀 节点选择"
+LINUXDO_RULESET = f"RULE-SET,{FORK_RAW}{LINUXDO_LIST},{LINUXDO_POLICY}"
+
 MITM_FIELDS = (("h2", "true"), ("enable", "true"))
 
 class AnchorMissing(RuntimeError):
@@ -266,6 +273,22 @@ def patch_direct_ruleset(text: str) -> str:
     return text[:start] + "\n\n" + DIRECT_RULESET + "\n\n" + text[start:].lstrip("\n")
 
 
+def patch_linuxdo_ruleset(text: str) -> str:
+    """LinuxDo.list 插到 [Rule] 最前面，压过个人直连表。
+
+    必须排在 patch_direct_ruleset 之后跑：那个函数也往 [Rule] 开头插，
+    后插的会顶到更前面，正好是需要的顺序。
+    """
+    if LINUXDO_RULESET in text:
+        return text
+    if LINUXDO_POLICY not in text:
+        raise AnchorMissing(
+            f"[Proxy Group] 里没有 {LINUXDO_POLICY}，{LINUXDO_LIST} 规则没有落点"
+        )
+    start, _ = _section_bounds(text, "Rule")
+    return text[:start] + "\n\n" + LINUXDO_RULESET + "\n\n" + text[start:].lstrip("\n")
+
+
 def patch_spotify_ruleset(text: str) -> str:
     if SPOTIFY_RULESET in text:
         return text
@@ -317,6 +340,7 @@ PATCHES = (
     patch_spotify_group,
     patch_fallback_policy,
     patch_direct_ruleset,
+    patch_linuxdo_ruleset,
     patch_spotify_ruleset,
     patch_mitm,
     patch_list_urls,
@@ -353,6 +377,30 @@ def verify(text: str) -> None:
             raise AnchorMissing(f"产物缺少 {name} 的 RULE-SET")
     if "🇹🇼 台湾节点" in text:
         raise AnchorMissing("产物里还有旧组名 🇹🇼 台湾节点")
+
+    # LinuxDo.list 的存在性 + 顺序。顺序错了规则就不起作用，且是静默的，必须查。
+    if LINUXDO_RULESET not in text:
+        raise AnchorMissing(f"产物缺少 {LINUXDO_RULESET}")
+    if text.index(LINUXDO_RULESET) > text.index(DIRECT_RULESET):
+        raise AnchorMissing(
+            f"{LINUXDO_LIST} 必须早于个人直连表，"
+            "否则 linux.do 会被按 DIRECT 处理而撞 RST"
+        )
+    blockdns = re.search(r"(?m)^RULE-SET,\S+/BlockHttpDNS/BlockHttpDNS\.list,.*$", text)
+    if blockdns and text.index(LINUXDO_RULESET) > blockdns.start():
+        raise AnchorMissing(
+            f"{LINUXDO_LIST} 必须早于 BlockHttpDNS.list，否则里面的 DoH 可能被 REJECT"
+        )
+
+    # 指向本 fork 的规则表必须真的存在于仓库里，否则手机拉到 404，规则静默失效。
+    # 这条挡的是"删掉某个 patch 后，拿旧产物当输入重新生成"——旧产物里的 RULE-SET
+    # 没有任何 patch 会去删，会一路留下来。
+    allowed = {LINUXDO_LIST}
+    if POINT_SYNCED_LISTS_AT_FORK:
+        allowed |= set(SYNCED_LISTS)
+    for name in re.findall(rf"{re.escape(FORK_RAW)}(\S+?\.list)", text):
+        if name not in allowed:
+            raise AnchorMissing(f"产物引用了本 fork 不存在的规则表: {name}")
 
 
 def _now_ts() -> str:

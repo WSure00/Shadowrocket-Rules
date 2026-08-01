@@ -76,9 +76,38 @@ class TestCriticalContent(unittest.TestCase):
             UPSTREAM.count("blackmatrix7"), self.out.count("blackmatrix7") - 1
         )  # -1 是我们加的 Spotify
 
-    def test_direct_ruleset_is_first_rule(self):
-        rules = [l for l in self.out.splitlines() if l.startswith(("RULE-SET,", "DOMAIN", "IP-CIDR", "GEOIP", "FINAL"))]
-        self.assertEqual(rules[0], overlay.DIRECT_RULESET)
+    def _rules(self):
+        return [
+            l for l in self.out.splitlines()
+            if l.startswith(("RULE-SET,", "DOMAIN", "IP-CIDR", "GEOIP", "FINAL"))
+        ]
+
+    def test_linuxdo_ruleset_comes_first(self):
+        """LinuxDo.list 在最前，个人直连表紧随其后。顺序错了规则静默失效。"""
+        self.assertEqual(
+            self._rules()[:2],
+            [overlay.LINUXDO_RULESET, overlay.DIRECT_RULESET],
+        )
+
+    def test_linuxdo_beats_personal_direct_list(self):
+        """linux.do 被墙（SNI 触发 RST），个人直连表把它标成 China，
+        LinuxDo.list 必须压在前面才能救回来。"""
+        self.assertLess(
+            self.out.index(overlay.LINUXDO_RULESET),
+            self.out.index(overlay.DIRECT_RULESET),
+        )
+
+    def test_linuxdo_beats_blockhttpdns(self):
+        """表里有 DoH 端点。BlockHttpDNS 每天现拉上游，哪天收录这些社区 DoH
+        就会落进默认 REJECT 的 🧱 DNS 防泄露，表现为静默断网。"""
+        blockdns = next(l for l in self._rules() if "BlockHttpDNS" in l)
+        self.assertLess(
+            self.out.index(overlay.LINUXDO_RULESET), self.out.index(blockdns)
+        )
+
+    def test_linuxdo_ruleset_points_at_fork(self):
+        """这份表只存在于本 fork，上游没有。"""
+        self.assertIn(overlay.FORK_RAW, overlay.LINUXDO_RULESET)
 
     def test_auto_group_is_fallback_over_all_regions(self):
         line = next(l for l in self.out.splitlines() if l.startswith(overlay.AUTO_GROUP + " ="))
@@ -278,6 +307,84 @@ class TestSyncedSha(unittest.TestCase):
             # 时间戳会刷新，其余内容不动
             self.assertEqual(_strip_ts(out.read_text(encoding="utf-8")), _strip_ts(before))
             self.assertEqual(overlay.read_synced_sha(shaf), sha2)
+
+
+class TestLinuxDoList(unittest.TestCase):
+    """自带的 LinuxDo.list 本身。论坛 + 客户端里配的 DoH 端点，同一个策略。"""
+
+    RULES = (
+        "DOMAIN-SUFFIX,linux.do",
+        "DOMAIN,edge.47258.xyz",
+        "DOMAIN,wsu.ddd.oaifree.com",
+        "DOMAIN,gameapi.47258.xyz",
+    )
+
+    def setUp(self):
+        self.path = HERE.parent / overlay.LINUXDO_LIST
+
+    def test_list_file_exists_with_expected_rules(self):
+        self.assertTrue(self.path.exists(), f"{overlay.LINUXDO_LIST} 不在仓库里")
+        lines = [
+            l.strip() for l in self.path.read_text(encoding="utf-8").splitlines()
+            if l.strip() and not l.strip().startswith("#")
+        ]
+        self.assertEqual(lines, list(self.RULES))
+
+    def test_no_policy_field_in_list_entries(self):
+        """表里不写第三个字段 —— 策略由 RULE-SET 那行给，写了容易看错。"""
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                self.assertEqual(line.count(","), 1, line)
+
+    def test_referenced_url_matches_shipped_filename(self):
+        """RULE-SET 里的 URL 和仓库里的文件名必须对上，否则手机拉 404。"""
+        self.assertIn(
+            overlay.FORK_RAW + overlay.LINUXDO_LIST, overlay.render(UPSTREAM)
+        )
+
+    def test_split_lists_are_gone(self):
+        """早先拆成 ForceProxy.list / DoH.list，已合并，残留会让人以为还在用。"""
+        for stale in ("ForceProxy.list", "DoH.list"):
+            with self.subTest(stale=stale):
+                self.assertFalse((HERE.parent / stale).exists())
+                self.assertNotIn(stale, overlay.render(UPSTREAM))
+
+    def test_verify_rejects_reference_to_nonexistent_fork_list(self):
+        """挡"删了某个 patch 后拿旧产物当输入重新生成"——旧产物里的 RULE-SET
+        没有任何 patch 会删，会一路留下来，手机拉到 404。"""
+        stale = f"RULE-SET,{overlay.FORK_RAW}DoH.list,DIRECT"
+        bad = overlay.render(UPSTREAM).replace(
+            overlay.LINUXDO_RULESET, overlay.LINUXDO_RULESET + "\n\n" + stale, 1
+        )
+        with self.assertRaises(AnchorMissing):
+            overlay.verify(bad)
+
+    def test_regenerating_from_own_output_is_clean(self):
+        """把产物再喂回去（本地调试常这么干）必须仍然自检通过。"""
+        once = overlay.render(UPSTREAM)
+        overlay.verify(overlay.render(once))
+
+    def test_missing_policy_raises(self):
+        """🚀 节点选择 被上游改名时要炸，而不是生成一条指向不存在策略组的规则。"""
+        with self.assertRaises(AnchorMissing):
+            overlay.render(UPSTREAM.replace(overlay.LINUXDO_POLICY, "🚀 改名了"))
+
+    def test_verify_rejects_wrong_order(self):
+        """把它挪到个人直连表后面，自检必须拦住。"""
+        good = overlay.render(UPSTREAM)
+        bad = good.replace(overlay.LINUXDO_RULESET + "\n\n", "", 1).replace(
+            overlay.DIRECT_RULESET,
+            overlay.DIRECT_RULESET + "\n\n" + overlay.LINUXDO_RULESET,
+            1,
+        )
+        with self.assertRaises(AnchorMissing):
+            overlay.verify(bad)
+
+    def test_verify_rejects_missing_ruleset(self):
+        bad = overlay.render(UPSTREAM).replace(overlay.LINUXDO_RULESET + "\n\n", "", 1)
+        with self.assertRaises(AnchorMissing):
+            overlay.verify(bad)
 
 
 class TestShippedArtifact(unittest.TestCase):

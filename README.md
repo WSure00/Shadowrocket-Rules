@@ -44,7 +44,68 @@ https://raw.githubusercontent.com/WSure00/Shadowrocket-Rules/refs/heads/main/Sha
 新增分流：
 
 - **`🎧 Spotify`** 策略组（默认 `DIRECT`）+ blackmatrix7 Spotify 规则集
-- **个人直连表** [`WSure00/ProxyResource`](https://github.com/WSure00/ProxyResource) 置于 `[Rule]` 最前面，优先级高于所有其他规则
+- **个人直连表** [`WSure00/ProxyResource`](https://github.com/WSure00/ProxyResource) 置于 `[Rule]` 靠前位置
+- **`LinuxDo.list`**（见下节），置于个人直连表**之前**
+
+## 自带规则表：LinuxDo.list
+
+只干一件事：让 [Dexo](https://github.com/Eilgnaw/dexo)（iOS 的 Discourse 客户端）能访问
+`linux.do`。论坛本身和客户端里配的三个 DoH 端点都在这份表里，同一个策略 `🚀 节点选择`。
+
+```
+DOMAIN-SUFFIX,linux.do
+DOMAIN,edge.47258.xyz
+DOMAIN,wsu.ddd.oaifree.com
+DOMAIN,gameapi.47258.xyz
+```
+
+`[Rule]` 开头两条的顺序是固定的，错了规则会**静默失效**，所以 `verify()` 会检查：
+
+```
+1. LinuxDo.list             -> 🚀 节点选择
+2. shadowrocket-direct.list -> DIRECT       个人直连表（ProxyResource）
+```
+
+它必须压在个人直连表前面，因为那份表里有 `DOMAIN-SUFFIX,linux.do,China`，
+会把论坛按 `DIRECT` 处理 —— 而 `linux.do` 被墙，直连必然失败。
+
+同时必须早于 `BlockHttpDNS.list`：那份表每天现拉 blackmatrix7 上游，一旦哪天收录了
+表里这类社区 DoH，就会落进默认 `REJECT` 的 `🧱 DNS 防泄露`，表现为静默断网。
+
+### linux.do 为什么只能走代理
+
+2026-08-02 实测：墙认的是 **SNI 不是 IP**。同一个 Cloudflare IP `172.66.166.61`，
+只换 SNI：
+
+| SNI | 结果 |
+|-----|------|
+| `linux.do` | 发完 TLS ClientHello 即「连接被对方重置」 |
+| `example.com` | 握手正常完成 |
+
+所以任何"把真实 IP 设成直连"的做法都救不了，只能走代理。国内 DNS 对它的污染也很彻底，
+三个解析源各给一个不同的假 IP（`64.13.192.76` 超时、`157.240.0.18` 是 Facebook 的段、
+`45.77.186.255` 是 Vultr 的段）。真实 IP 是 Cloudflare anycast 会变，所以按域名写规则。
+
+根治办法是去 `ProxyResource` 删掉那行 `linux.do`；这里做覆盖是为了不跨仓库改动也能生效。
+
+### 三个 DoH 端点为什么也走代理
+
+它们国内直连本来就通，设成直连会稍快一点。但一份 `RULE-SET` 只能绑一个策略，
+而 `linux.do` 必须走代理，所以跟着走代理。
+
+代价可以接受，实测确认了两点：两个活端点都不广告 `alt-svc`，客户端不会升级到 h3，
+所以 `block-quic = all-proxy` 对它们没影响；两个端点走 HTTP/2 都是 200，境外可达，
+经代理不会失败。反过来还有个好处 —— 哪天这些端点自己被 SNI 封了，走代理仍然能用。
+
+| 端点 | 2026-08-02 直连实测 |
+|------|---------------------|
+| `edge.47258.xyz` | HTTP/2 200，0.22s，稳定。**只认 wireformat**，发 dns-json 返回 400 |
+| `wsu.ddd.oaifree.com` | HTTP/2 200，0.3~1.8s。wireformat 和 dns-json 都支持 |
+| `gameapi.47258.xyz` | **三个 IP 全不通**，TLS 握完后服务端不协商 ALPN、0 字节超时，源站疑似已死 |
+
+需要注意的是，**走代理的流量由落地节点重新解析**，客户端自己用 DoH 查到的 IP 在那一步
+会被丢掉。所以客户端内配 DoH 对 `linux.do` 这类走代理的域名基本是装饰性的，真正让它
+能通的是代理本身。
 
 保持上游原样的地方：`AI.list` 等 5 份规则表的 URL 仍指向上游 main（有意如此），
 blackmatrix7 等第三方规则集 URL 不动。
