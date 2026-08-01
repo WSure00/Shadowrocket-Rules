@@ -89,13 +89,24 @@ class TestCriticalContent(unittest.TestCase):
             [overlay.LINUXDO_RULESET, overlay.DIRECT_RULESET],
         )
 
+    def test_linuxdo_is_direct(self):
+        """linux.do 要直连。它没被按 SNI 封，问题是国内 DNS 污染，
+        靠 [Host] 段钉干净 DoH 解决，不是靠走代理。"""
+        self.assertEqual(overlay.LINUXDO_POLICY, "DIRECT")
+        self.assertTrue(self.out.count(overlay.LINUXDO_RULESET))
+
     def test_linuxdo_beats_personal_direct_list(self):
-        """linux.do 被墙（SNI 触发 RST），个人直连表把它标成 China，
-        LinuxDo.list 必须压在前面才能救回来。"""
+        """两边都是 DIRECT，固定顺序只为不因上游改动而漂。"""
         self.assertLess(
             self.out.index(overlay.LINUXDO_RULESET),
             self.out.index(overlay.DIRECT_RULESET),
         )
+
+    def test_host_pins_linuxdo_to_clean_doh(self):
+        """少了这几行，规则命中 DIRECT 但解析拿到污染 IP，照样打不开。"""
+        host = self.out[slice(*overlay._section_bounds(self.out, "Host"))]
+        for line in overlay.HOST_DOH_LINES:
+            self.assertIn(line, host)
 
     def test_linuxdo_beats_blockhttpdns(self):
         """表里有 DoH 端点。BlockHttpDNS 每天现拉上游，哪天收录这些社区 DoH
@@ -365,10 +376,34 @@ class TestLinuxDoList(unittest.TestCase):
         once = overlay.render(UPSTREAM)
         overlay.verify(overlay.render(once))
 
-    def test_missing_policy_raises(self):
-        """🚀 节点选择 被上游改名时要炸，而不是生成一条指向不存在策略组的规则。"""
+    def test_verify_rejects_duplicate_ruleset(self):
+        """改了策略后拿旧产物当输入重新生成，会留下两条策略冲突的同名规则，
+        靠前的生效，表面看不出问题。开发中踩到过两次。"""
+        stale = f"RULE-SET,{overlay.FORK_RAW}{overlay.LINUXDO_LIST},🚀 节点选择"
+        bad = overlay.render(UPSTREAM).replace(
+            overlay.LINUXDO_RULESET, overlay.LINUXDO_RULESET + "\n\n" + stale, 1
+        )
         with self.assertRaises(AnchorMissing):
-            overlay.render(UPSTREAM.replace(overlay.LINUXDO_POLICY, "🚀 改名了"))
+            overlay.verify(bad)
+
+    def test_verify_rejects_missing_host_doh(self):
+        """[Host] 里的 DoH 钉定被抹掉时自检要炸 —— 规则对但解析坏，
+        表现是"命中 DIRECT 却打不开"，很难查。"""
+        import re as _re
+        for line in overlay.HOST_DOH_LINES:
+            with self.subTest(line=line):
+                # 按整行删。'linux.do = ...' 是 '*.linux.do = ...' 的子串，
+                # 直接 replace 会删错行，那样这条测试会假通过。
+                bad = _re.sub(
+                    rf"(?m)^{_re.escape(line)}$\n", "", overlay.render(UPSTREAM), count=1
+                )
+                with self.assertRaises(AnchorMissing):
+                    overlay.verify(bad)
+
+    def test_host_doh_server_is_a_working_endpoint(self):
+        """[Host] 里用的 DoH 必须是表里那几个之一，且不能是已知死掉的那个。"""
+        self.assertIn("wsu.ddd.oaifree.com", overlay.HOST_DOH_SERVER)
+        self.assertNotIn("gameapi.47258.xyz", overlay.HOST_DOH_SERVER)
 
     def test_verify_rejects_wrong_order(self):
         """把它挪到个人直连表后面，自检必须拦住。"""

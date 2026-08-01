@@ -72,8 +72,17 @@ DIRECT_RULESET = (
 # 本仓库自带的规则表（论坛本身 + 客户端里配的 DoH 端点，同一个策略）。
 # URL 指向 fork —— 它只存在于这里，上游没有。
 LINUXDO_LIST = "LinuxDo.list"
-LINUXDO_POLICY = "🚀 节点选择"
+LINUXDO_POLICY = "DIRECT"
 LINUXDO_RULESET = f"RULE-SET,{FORK_RAW}{LINUXDO_LIST},{LINUXDO_POLICY}"
+
+# linux.do 走 DIRECT，但国内 DNS 对它污染极彻底：alidns / 119.29.29.29 /
+# 223.5.5.5 分别给 108.160.167.174(Dropbox 段)、31.13.75.12(Facebook 段) 等，
+# 全部连不通。只改规则不改解析，DIRECT 拿到污染 IP 照样上不去 —— 这正是
+# 之前"命中了 DIRECT 但还是打不开"的原因。
+# 这里把它的解析钉到干净 DoH（wsu 两种格式都支持，实测返回真实 Cloudflare IP）。
+HOST_DOH_SERVER = "https://wsu.ddd.oaifree.com/query-dns"
+HOST_DOH_DOMAINS = ("linux.do", "*.linux.do")
+HOST_DOH_LINES = tuple(f"{d} = server:{HOST_DOH_SERVER}" for d in HOST_DOH_DOMAINS)
 
 MITM_FIELDS = (("h2", "true"), ("enable", "true"))
 
@@ -289,6 +298,24 @@ def patch_linuxdo_ruleset(text: str) -> str:
     return text[:start] + "\n\n" + LINUXDO_RULESET + "\n\n" + text[start:].lstrip("\n")
 
 
+def patch_host_doh(text: str) -> str:
+    """把 linux.do 的解析钉到干净 DoH。
+
+    它走 DIRECT，而 DIRECT 由 Shadowrocket 用 [General] 里的国内 dns-server
+    自己解析 —— 那几个对 linux.do 污染得很彻底，拿到的 IP 全连不通。
+    只改规则策略不改这里，DIRECT 照样打不开。
+    """
+    start, end = _section_bounds(text, "Host")
+    body = text[start:end]
+    # 按整行比，不用子串 —— "linux.do = server:X" 是 "*.linux.do = server:X"
+    # 的子串，子串比法会让前者永远被判成"已存在"而漏插。
+    existing = {l.strip() for l in body.splitlines()}
+    add = [l for l in HOST_DOH_LINES if l not in existing]
+    if not add:
+        return text
+    return text[:start] + "\n" + "\n".join(add) + "\n" + body.lstrip("\n") + text[end:]
+
+
 def patch_spotify_ruleset(text: str) -> str:
     if SPOTIFY_RULESET in text:
         return text
@@ -341,6 +368,7 @@ PATCHES = (
     patch_fallback_policy,
     patch_direct_ruleset,
     patch_linuxdo_ruleset,
+    patch_host_doh,
     patch_spotify_ruleset,
     patch_mitm,
     patch_list_urls,
@@ -383,8 +411,8 @@ def verify(text: str) -> None:
         raise AnchorMissing(f"产物缺少 {LINUXDO_RULESET}")
     if text.index(LINUXDO_RULESET) > text.index(DIRECT_RULESET):
         raise AnchorMissing(
-            f"{LINUXDO_LIST} 必须早于个人直连表，"
-            "否则 linux.do 会被按 DIRECT 处理而撞 RST"
+            f"{LINUXDO_LIST} 必须早于个人直连表 —— 两边都是 DIRECT，"
+            "但顺序固定下来才不会因为上游改动而漂"
         )
     blockdns = re.search(r"(?m)^RULE-SET,\S+/BlockHttpDNS/BlockHttpDNS\.list,.*$", text)
     if blockdns and text.index(LINUXDO_RULESET) > blockdns.start():
@@ -392,15 +420,34 @@ def verify(text: str) -> None:
             f"{LINUXDO_LIST} 必须早于 BlockHttpDNS.list，否则里面的 DoH 可能被 REJECT"
         )
 
+    # linux.do 走 DIRECT 时由 Shadowrocket 自己解析，国内 dns-server 对它污染
+    # 极彻底（拿到的 IP 全连不通）。少了这几行，规则是对的但照样打不开。
+    host_start, host_end = _section_bounds(text, "Host")
+    # 按整行比，不用子串 —— "linux.do = server:X" 是 "*.linux.do = server:X"
+    # 的子串，子串比法会让前者漏检。
+    host_lines = {l.strip() for l in text[host_start:host_end].splitlines()}
+    for line in HOST_DOH_LINES:
+        if line not in host_lines:
+            raise AnchorMissing(f"[Host] 段缺少 DoH 钉定: {line}")
+
     # 指向本 fork 的规则表必须真的存在于仓库里，否则手机拉到 404，规则静默失效。
     # 这条挡的是"删掉某个 patch 后，拿旧产物当输入重新生成"——旧产物里的 RULE-SET
     # 没有任何 patch 会去删，会一路留下来。
     allowed = {LINUXDO_LIST}
     if POINT_SYNCED_LISTS_AT_FORK:
         allowed |= set(SYNCED_LISTS)
-    for name in re.findall(rf"{re.escape(FORK_RAW)}(\S+?\.list)", text):
+    referenced = re.findall(rf"{re.escape(FORK_RAW)}(\S+?\.list)", text)
+    for name in referenced:
         if name not in allowed:
             raise AnchorMissing(f"产物引用了本 fork 不存在的规则表: {name}")
+
+    # 同一份表只能出现一次。改了某个 patch 的策略后拿旧产物当输入重新生成时，
+    # 旧那条不会被删，新那条会插在前面 —— 两条策略冲突，靠前的生效，
+    # 表面上看不出问题。开发中踩到过两次。
+    for name in set(referenced):
+        n = referenced.count(name)
+        if n > 1:
+            raise AnchorMissing(f"{name} 在产物里出现 {n} 次，应当只有一条")
 
 
 def _now_ts() -> str:
