@@ -1,0 +1,127 @@
+name: 同步上游
+
+# 每天看一眼 LingJingMaster/Shadowrocket-Rules 有没有新提交。
+# 有才跑 overlay 生成自用版并直接提交到本 fork 的 main（不走 PR 审核）；
+# 没有就直接结束，不下载、不生成。
+
+on:
+  schedule:
+    - cron: '30 19 * * *'   # 03:30 UTC+8
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '忽略 .upstream-sha，强制重跑一次'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: LingJingMaster/Shadowrocket-Rules
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.compare.outputs.sha }}
+      stale: ${{ steps.compare.outputs.stale }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 比对上游 HEAD 与已同步的 commit
+        id: compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/${UPSTREAM}/commits/main" --jq .sha)
+          if [ -z "$sha" ]; then
+            echo "::error::拿不到上游 SHA"
+            exit 1
+          fi
+          synced=$(python3 tools/overlay.py --synced-sha)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "上游 HEAD : $sha"
+          echo "已同步    : ${synced:-（无记录）}"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "手动强制重跑"
+          elif [ "$synced" = "$sha" ]; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            echo "上游没有新提交，直接结束"
+          else
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "有新提交，开始同步"
+          fi
+
+  sync:
+    needs: check
+    if: needs.check.outputs.stale == 'true'
+    runs-on: ubuntu-latest
+    env:
+      SHA: ${{ needs.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 跑 overlay 回归测试
+        run: python3 tools/test_overlay.py
+
+      - name: 按 SHA 下载上游文件
+        run: |
+          set -euo pipefail
+          # 按 SHA 而不是按分支下载：上游在下载途中推新提交的话，
+          # 按分支会拿到一份前后不一致的混合版本。
+          mkdir -p /tmp/up
+          base="https://raw.githubusercontent.com/${UPSTREAM}/${SHA}"
+          for f in Shadowrocket.conf AI.list Apple.list ApplePush.list Google.list HK_Broker.list; do
+            curl -fsSL --retry 3 --retry-delay 5 -o "/tmp/up/$f" "$base/$f"
+          done
+
+      - name: 生成配置并同步规则表
+        run: |
+          set -euo pipefail
+          python3 tools/overlay.py --upstream /tmp/up/Shadowrocket.conf --sha "$SHA"
+          # 这 5 份是上游原文的镜像，本仓库不改动，直接覆盖
+          for f in AI.list Apple.list ApplePush.list Google.list HK_Broker.list; do
+            cp "/tmp/up/$f" "$f"
+          done
+
+      - name: 产物自检
+        run: python3 tools/overlay.py --check
+
+      - name: CA 私钥兜底扫描
+        run: |
+          # overlay.verify() 之外的第二道防线：扫所有要提交的文件。
+          # 模式故意宽松，任意缩进/Tab/等号旁无空格/大小写都算命中。
+          if grep -rniE '^[[:space:]]*ca-(p12|passphrase)[[:space:]]*=' Shadowrocket.conf ./*.list; then
+            echo "::error::产物里出现 CA 私钥字段，中止提交"
+            exit 1
+          fi
+          echo "OK 没有 CA 字段"
+
+      - name: 提交
+        run: |
+          set -euo pipefail
+          # 跑到这里必然有变化：时间戳每次同步都刷，.upstream-sha 也会更新。
+          # 这个判断只是兜底，真为空说明前面某步没干活。
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "::error::预期有改动（至少时间戳和 .upstream-sha），但工作区是干净的"
+            exit 1
+          fi
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "chore: 同步上游 ${SHA:0:7}"
+          git push
+          echo "已推送"

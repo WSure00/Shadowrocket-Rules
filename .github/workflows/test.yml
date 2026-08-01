@@ -1,0 +1,23 @@
+name: 测试
+
+# 改了 overlay 就立刻验，不用等到第二天的定时同步才发现写错了。
+
+on:
+  push:
+    paths: ['tools/**', 'Shadowrocket.conf', '.github/workflows/**']
+  pull_request:
+    paths: ['tools/**', 'Shadowrocket.conf', '.github/workflows/**']
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 回归测试
+        run: python3 tools/test_overlay.py
+      - name: 产物自检
+        run: python3 tools/overlay.py --check

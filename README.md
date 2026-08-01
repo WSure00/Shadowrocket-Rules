@@ -1,3 +1,100 @@
+> **本仓库是 fork。** 下面先写清楚我在上游基础上改了什么，
+> [原作者文档](#以下为上游原文)在后半部分原样保留。
+>
+> 上游：[LingJingMaster/Shadowrocket-Rules](https://github.com/LingJingMaster/Shadowrocket-Rules)
+
+# 本 fork 的改动
+
+导入链接（注意是本 fork，不是上游）：
+
+```
+https://raw.githubusercontent.com/WSure00/Shadowrocket-Rules/refs/heads/main/Shadowrocket.conf
+```
+
+## 节点自动化：只管开关，不选节点
+
+上游的 `🚀 节点选择` 默认落在 `PROXY`，需要手动挑节点。本 fork 加了一层自动兜底：
+
+| 策略组 | 类型 | 说明 |
+|--------|------|------|
+| `♻️ 自动` | fallback | 按 香港 → 台湾 → 日本 → 美国 → 其他 → DIRECT 顺序自动故障转移 |
+| `🚀 节点选择` | select | 默认项改为 `♻️ 自动`（上游是 `PROXY`） |
+
+配合测速参数收紧，切换更快：
+
+| 参数 | 上游 | 本 fork |
+|------|------|---------|
+| `interval` | 600 | **450** |
+| `tolerance` | 0 | **50** |
+| `timeout` | 5 | **2** |
+
+`🌍 非中国` 和 `🐟 漏网之鱼` 的默认项也从 `PROXY` 改成 `🚀 节点选择`，
+让它们跟着主策略走，不用分别设置。
+
+## 其他改动
+
+| 项 | 上游 | 本 fork | 为什么 |
+|----|------|---------|--------|
+| 头部注释 | `可分享版` + 固定的 `更新时间` | `自用版` + `生成时间` + `Author` | `生成时间`**每次同步都会刷新**，记录这份配置对齐到上游的时刻 |
+| `update-url` | 指向上游 | **指向本 fork** | 指向上游的话，App 每次更新配置都会拉回原版，把所有个人改动覆盖掉 |
+| `ipv6` | `false` | **`true`** | 启用 IPv6 |
+| 台湾节点组名 | `🇹🇼 台湾节点` | **`🇨🇳 台湾节点`** | 仅改组名；`policy-regex-filter` 里的 `🇹🇼` 保持不动，它要匹配机场给出的真实节点名 |
+| `[MITM]` | 只有 `hostname` | 补 **`h2 = true`**、**`enable = true`** | 开启 MITM 与 HTTP/2 解密 |
+
+新增分流：
+
+- **`🎧 Spotify`** 策略组（默认 `DIRECT`）+ blackmatrix7 Spotify 规则集
+- **个人直连表** [`WSure00/ProxyResource`](https://github.com/WSure00/ProxyResource) 置于 `[Rule]` 最前面，优先级高于所有其他规则
+
+保持上游原样的地方：`AI.list` 等 5 份规则表的 URL 仍指向上游 main（有意如此），
+blackmatrix7 等第三方规则集 URL 不动。
+
+## 自动同步上游
+
+每天 03:30（UTC+8）自动同步，直接提交到本 fork 的 main，不走 PR。
+
+`Shadowrocket.conf` 是**生成物**，直接编辑会被下一次同步覆盖。个人改动写在
+`tools/overlay.py` 里 —— 它把上游原文经过一串幂等变换生成自用版。仓库不跟踪上游那份
+原文，CI 每天现拉现用，所以 git 层面不存在共同修改的文件，永远不会有合并冲突。
+
+```
+上游有新提交？──否──> 直接结束
+       │
+       是
+       v
+按 SHA 下载 ──> overlay.py ──> 自检 ──> 提交到 fork main
+```
+
+| 想做的事 | 怎么做 |
+|----------|--------|
+| 调整策略组、规则、DNS 等 | 改 `tools/overlay.py` 里的 patch 函数，**同时更新本节以上的改动说明** |
+| 本地预览生成结果 | `python3 tools/overlay.py --fetch` |
+| 校验现有产物 | `python3 tools/overlay.py --check` |
+| 跑回归测试 | `python3 tools/test_overlay.py` |
+| 立即同步一次 | Actions → 同步上游 → Run workflow |
+| 强制重新生成 | 同上，勾选 `force` |
+
+几个设计约束：
+
+- **上游没新提交就直接结束**。`.upstream-sha` 记着已同步到哪个 commit，
+  跟上游 HEAD 一致就不下载、不生成。
+- **真同步了就刷时间戳**。上游有新提交但生成结果一字节没变时（比如上游只改了自己的
+  README），配置里仍会更新 `生成时间` 并提交 —— 这样从配置就能看出最后一次对齐上游是什么时候。
+- **每个 patch 都绑一个锚点**，上游结构变了锚点找不到就直接让 CI 失败。宁可红，
+  也不要静默生成一份看着正常但少了规则的配置。
+- **按 commit SHA 下载**而不是按分支：上游在下载途中推新提交的话，按分支会拿到一份
+  前后不一致的混合版本。
+- **CA 私钥永不进入本仓库**。`ca-p12` / `ca-passphrase` 是设备 MITM 根 CA 的私钥，
+  公开等于任何人都能为任意域名签发该设备信任的证书。`overlay.py` 的 `verify()` 和
+  workflow 的 grep 扫描两道防线都会拦住它。需要 MITM 时在 App 内本地生成并信任证书即可。
+
+---
+
+# 以下为上游原文
+
+> 下面是原作者 README 的原样保留，描述的是**上游配置**。
+> 与本 fork 的差异见上文，不再在此重复标注。
+
 # Shadowrocket 配置文件
 
 一份开箱即用的 Shadowrocket 规则配置，导入后添加自己的节点或订阅即可使用。
