@@ -151,6 +151,28 @@ blackmatrix7 等第三方规则集 URL 不动。
   公开等于任何人都能为任意域名签发该设备信任的证书。`overlay.py` 的 `verify()` 和
   workflow 的 grep 扫描两道防线都会拦住它。需要 MITM 时在 App 内本地生成并信任证书即可。
 
+### GitHub 页面上的「落后 N 个提交」可以无视
+
+fork 页面会一直显示 `This branch is N commits behind LingJingMaster:main`，
+**这个数字永远不会归零，而且会随上游每次推送持续增长。它不代表同步失败。**
+
+GitHub 比的是**提交图谱** —— 问的是"上游那个 commit 对象在不在你的历史里"。
+本仓库走的是重新生成的路线：把上游的**内容**经 overlay 生成一遍，从不把上游的
+commit 对象合并进来。所以内容是同步的，图谱是分叉的（`status=diverged`）。
+
+> ⚠️ **不要点页面上的 "Sync fork" 按钮。** 那会把上游原版 `Shadowrocket.conf`
+> 合并进来，和 overlay 生成的版本正面冲突，个人改动会被搅乱。同步一律交给
+> `sync-upstream.yml`。
+
+判断是否真的同步到位，看 `.upstream-sha` 和上游 HEAD 是否一致：
+
+```bash
+[ "$(cat .upstream-sha)" = "$(gh api repos/LingJingMaster/Shadowrocket-Rules/commits/main --jq .sha)" ] \
+  && echo 已是最新 || echo 有待同步的上游提交
+```
+
+或者更省事：看 Actions 里最近一次「同步上游」是不是绿的。
+
 ---
 
 # 以下为上游原文
