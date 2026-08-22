@@ -179,8 +179,15 @@ class TestAnchors(unittest.TestCase):
         "ipv6": "ipv6 = false\n",
         "select": "🚀 节点选择 = select,PROXY,DIRECT,REJECT,🇭🇰 香港节点,🇹🇼 台湾节点,🇯🇵 日本节点,🇺🇸 美国节点,🌐 其他节点\n",
         "dns-leak": "🧱 DNS 防泄露 = select,REJECT,🚀 节点选择,DIRECT\n",
-        "advertising": "RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Advertising/Advertising.list,🛑 广告拦截\n",
     }
+
+    # Spotify 规则的插入锚点。这些只是插入位置，不是关键内容，
+    # 上游删了哪个都该退到下一个，全没了才炸。
+    SPOTIFY_ANCHORS = [
+        "RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Advertising/Advertising.list,🛑 广告拦截\n",
+        "RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/YouTube/YouTube.list,📹 油管视频\n",
+        "RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/China/China.list,🔒 国内服务\n",
+    ]
 
     def test_missing_anchor_raises(self):
         for label, anchor in self.CASES.items():
@@ -204,6 +211,25 @@ class TestAnchors(unittest.TestCase):
         broken = UPSTREAM.replace(overlay.UPSTREAM_RAW + "HK_Broker.list", "")
         with self.assertRaises(AnchorMissing):
             overlay.render(broken)
+
+    def test_spotify_anchor_falls_back(self):
+        """上游删掉靠前的锚点时，退到下一个，Spotify 规则不能丢。
+        真实案例：2026-08-22 上游删了 Advertising 规则，同步炸了两天。"""
+        for keep in range(len(self.SPOTIFY_ANCHORS) - 1):
+            upstream = UPSTREAM
+            for anchor in self.SPOTIFY_ANCHORS[:keep + 1]:
+                self.assertIn(anchor, upstream, "测试自身失效：锚点已不在上游快照里")
+                upstream = upstream.replace(anchor, "")
+            with self.subTest(removed=keep + 1):
+                out = overlay.render(upstream)
+                self.assertIn(overlay.SPOTIFY_RULESET, out)
+
+    def test_all_spotify_anchors_gone_raises(self):
+        upstream = UPSTREAM
+        for anchor in self.SPOTIFY_ANCHORS:
+            upstream = upstream.replace(anchor, "")
+        with self.assertRaises(AnchorMissing):
+            overlay.render(upstream)
 
 
 class TestUpstreamEvolution(unittest.TestCase):

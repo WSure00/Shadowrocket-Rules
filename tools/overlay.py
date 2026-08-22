@@ -319,13 +319,23 @@ def patch_host_doh(text: str) -> str:
 def patch_spotify_ruleset(text: str) -> str:
     if SPOTIFY_RULESET in text:
         return text
-    new, n = _sub_in_section(
-        text, "Rule", r"(?m)^(RULE-SET,\S+/Advertising/Advertising\.list,.*)$",
-        lambda m: m.group(1) + "\n\n" + SPOTIFY_RULESET, count=1,
-    )
-    if not n:
-        raise AnchorMissing("[Rule] 里没有 Advertising 规则，Spotify 规则没有落点")
-    return new
+    # 依次尝试一组锚点：上游 2026-08-22 删了 Advertising 规则（连带广告拦截组），
+    # 单一锚点太脆。顺序按原来的插入位置排，靠前的还在就用靠前的。
+    # 都是插入位置而非关键内容，缺哪个都行，全没了才算真出事。
+    anchors = [
+        (r"(?m)^(RULE-SET,\S+/Advertising/Advertising\.list,.*)$", "after"),
+        (r"(?m)^(RULE-SET,\S+/YouTube/YouTube\.list,.*)$", "after"),
+        (r"(?m)^(RULE-SET,\S+/China/China\.list,.*)$", "before"),
+    ]
+    for pattern, where in anchors:
+        if where == "after":
+            repl = lambda m: m.group(1) + "\n\n" + SPOTIFY_RULESET  # noqa: E731
+        else:
+            repl = lambda m: SPOTIFY_RULESET + "\n\n" + m.group(1)  # noqa: E731
+        new, n = _sub_in_section(text, "Rule", pattern, repl, count=1)
+        if n:
+            return new
+    raise AnchorMissing("[Rule] 里找不到任何可用锚点，Spotify 规则没有落点")
 
 
 def patch_mitm(text: str) -> str:
