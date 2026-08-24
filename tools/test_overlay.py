@@ -120,15 +120,24 @@ class TestCriticalContent(unittest.TestCase):
         """这份表只存在于本 fork，上游没有。"""
         self.assertIn(overlay.FORK_RAW, overlay.LINUXDO_RULESET)
 
-    def test_auto_group_is_fallback_over_all_regions(self):
+    def test_auto_group_is_single_layer_url_test(self):
+        """♻️ 自动必须是单层 url-test 直接测全部节点。
+
+        fallback 嵌套地区组在 Shadowrocket 下不会级联触发子组测速，
+        非生效子组永远"不可用"，最后静默落到 DIRECT —— 国外流量直连。
+        """
         line = next(l for l in self.out.splitlines() if l.startswith(overlay.AUTO_GROUP + " ="))
-        self.assertTrue(line.startswith(overlay.AUTO_GROUP + " = fallback,"))
+        self.assertTrue(line.startswith(overlay.AUTO_GROUP + " = url-test,"))
+        self.assertIn("policy-regex-filter=", line)
+        # fallback 时代的老毛病：DIRECT 兜底静默直连，地区组嵌套不生效
+        self.assertNotIn("DIRECT", line)
         for region in ("🇭🇰 香港节点", "🇨🇳 台湾节点", "🇯🇵 日本节点", "🇺🇸 美国节点", "🌐 其他节点"):
-            self.assertIn(region, line)
+            self.assertNotIn(region, line)
 
     def test_url_test_tuning_applied_everywhere(self):
         for line in self.out.splitlines():
-            if "= url-test," in line:
+            # ♻️ 自动有自己的测速参数，不归 URL_TEST_TUNING 管
+            if "= url-test," in line and not line.startswith(overlay.AUTO_GROUP + " ="):
                 for key, val in overlay.URL_TEST_TUNING.items():
                     self.assertIn(f"{key}={val}", line)
 
@@ -234,7 +243,7 @@ class TestAnchors(unittest.TestCase):
 
 class TestUpstreamEvolution(unittest.TestCase):
     def test_new_region_group_picked_up(self):
-        """上游以后加了地区组，应自动套上测速参数并进 自动/节点选择 两个组。"""
+        """上游以后加了地区组，应自动套上测速参数并进 节点选择 组。"""
         added = "🇸🇬 新加坡节点 = url-test,url=http://www.gstatic.com/generate_204,interval=600,tolerance=0,timeout=5,policy-regex-filter=SG\n"
         upstream = UPSTREAM.replace(
             "🌐 其他节点 = url-test", added + "🌐 其他节点 = url-test"
@@ -244,8 +253,10 @@ class TestUpstreamEvolution(unittest.TestCase):
         self.assertIn("interval=450", line)
         self.assertIn("tolerance=50", line)
         self.assertIn("timeout=2", line)
-        for group in ("🚀 节点选择 =", overlay.AUTO_GROUP + " ="):
-            self.assertIn("🇸🇬 新加坡节点", next(l for l in out.splitlines() if l.startswith(group)))
+        self.assertIn(
+            "🇸🇬 新加坡节点",
+            next(l for l in out.splitlines() if l.startswith("🚀 节点选择 =")),
+        )
 
     def test_params_parsed_exactly_not_by_substring(self):
         """'interval=600' 是 'check-interval=600' 的子串 —— 必须按参数名精确比。"""

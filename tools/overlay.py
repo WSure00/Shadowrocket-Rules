@@ -59,6 +59,17 @@ SHA_FILE = ".upstream-sha"
 
 AUTO_GROUP = "♻️ 自动"
 URL_TEST_TUNING = {"interval": "450", "tolerance": "50", "timeout": "2"}
+# ♻️ 自动：单层 url-test，直接对全部节点测速。
+# 不用 fallback 嵌套地区组：Shadowrocket 只测当前生效的策略链，
+# fallback 切换时不会触发子组重新测速，非生效子组永远"不可用"，
+# 最后静默落到永远可用的 DIRECT —— 国外流量直连还不易察觉。
+# timeout=5：经代理访问 gstatic，2s 太紧，网络一抖就整组误判不可用。
+# 正则排除机场的信息节点（剩余流量/官网之类），它们不是可用代理。
+AUTO_URL_TEST = (
+    f"{AUTO_GROUP} = url-test,url=http://www.gstatic.com/generate_204,"
+    "interval=300,tolerance=50,timeout=5,"
+    "policy-regex-filter=^(?!.*(直连|剩余|流量|官网|试用|到期)).*$"
+)
 SPOTIFY_GROUP = "🎧 Spotify = select,DIRECT,🚀 节点选择,🇺🇸 美国节点,policy-select-name=DIRECT"
 SPOTIFY_RULESET = (
     "RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master"
@@ -206,12 +217,16 @@ def patch_url_test_tuning(text: str) -> str:
 
 
 def _region_groups(text: str) -> list[str]:
-    """按出现顺序取出所有 url-test 地区组的组名。"""
+    """按出现顺序取出所有 url-test 地区组的组名。
+
+    要排除 ♻️ 自动 自身：它也是 url-test 组，二次跑 overlay 时会混进来，
+    幂等性就破了。
+    """
     start, end = _section_bounds(text, "Proxy Group")
     names = [
         line.partition("=")[0].strip()
         for line in text[start:end].splitlines()
-        if _is_url_test(line)
+        if _is_url_test(line) and line.partition("=")[0].strip() != AUTO_GROUP
     ]
     if not names:
         raise AnchorMissing("[Proxy Group] 里没有地区组")
@@ -219,7 +234,7 @@ def _region_groups(text: str) -> list[str]:
 
 
 def patch_select_and_auto(text: str) -> str:
-    """节点选择默认走 ♻️ 自动，并补一个 fallback 组。
+    """节点选择默认走 ♻️ 自动；♻️ 自动是单层 url-test，直接测全部节点。
 
     用户的节点自动化目标是"只管开关、不选节点"。
     """
@@ -228,7 +243,7 @@ def patch_select_and_auto(text: str) -> str:
         "🚀 节点选择 = select," + AUTO_GROUP + ",PROXY,DIRECT,REJECT,"
         + ",".join(regions) + f",policy-select-name={AUTO_GROUP}"
     )
-    auto = f"{AUTO_GROUP} = fallback," + ",".join(regions) + ",DIRECT"
+    auto = AUTO_URL_TEST
 
     new, n = _sub_in_section(
         text, "Proxy Group", r"(?m)^🚀 节点选择\s*=.*$", lambda _: select, count=1
@@ -403,7 +418,7 @@ def verify(text: str) -> None:
         f"update-url = {FORK_CONF_URL}",
         "FINAL,",
         "GEOIP,CN,",
-        AUTO_GROUP + " = fallback,",
+        AUTO_GROUP + " = url-test,",
         "🇨🇳 台湾节点 =",
     ]
     for token in required:
