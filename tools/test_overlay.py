@@ -120,24 +120,23 @@ class TestCriticalContent(unittest.TestCase):
         """这份表只存在于本 fork，上游没有。"""
         self.assertIn(overlay.FORK_RAW, overlay.LINUXDO_RULESET)
 
-    def test_auto_group_is_single_layer_url_test(self):
-        """♻️ 自动必须是单层 url-test 直接测全部节点。
+    def test_auto_group_is_single_layer_fallback(self):
+        """♻️ 自动必须是单层 fallback，直接对全部节点测活。
 
-        fallback 嵌套地区组在 Shadowrocket 下不会级联触发子组测速，
+        嵌套地区组在 Shadowrocket 下不会级联触发子组测速，
         非生效子组永远"不可用"，最后静默落到 DIRECT —— 国外流量直连。
         """
         line = next(l for l in self.out.splitlines() if l.startswith(overlay.AUTO_GROUP + " ="))
-        self.assertTrue(line.startswith(overlay.AUTO_GROUP + " = url-test,"))
+        self.assertTrue(line.startswith(overlay.AUTO_GROUP + " = fallback,"))
         self.assertIn("policy-regex-filter=", line)
-        # fallback 时代的老毛病：DIRECT 兜底静默直连，地区组嵌套不生效
+        # 老毛病：DIRECT 兜底静默直连，地区组嵌套不生效
         self.assertNotIn("DIRECT", line)
         for region in ("🇭🇰 香港节点", "🇨🇳 台湾节点", "🇯🇵 日本节点", "🇺🇸 美国节点", "🌐 其他节点"):
             self.assertNotIn(region, line)
 
     def test_url_test_tuning_applied_everywhere(self):
         for line in self.out.splitlines():
-            # ♻️ 自动有自己的测速参数，不归 URL_TEST_TUNING 管
-            if "= url-test," in line and not line.startswith(overlay.AUTO_GROUP + " ="):
+            if "= url-test," in line:
                 for key, val in overlay.URL_TEST_TUNING.items():
                     self.assertIn(f"{key}={val}", line)
 

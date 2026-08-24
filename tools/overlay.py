@@ -59,16 +59,19 @@ SHA_FILE = ".upstream-sha"
 
 AUTO_GROUP = "♻️ 自动"
 URL_TEST_TUNING = {"interval": "450", "tolerance": "50", "timeout": "2"}
-# ♻️ 自动：单层 url-test，直接对全部节点测速。
-# 不用 fallback 嵌套地区组：Shadowrocket 只测当前生效的策略链，
-# fallback 切换时不会触发子组重新测速，非生效子组永远"不可用"，
-# 最后静默落到永远可用的 DIRECT —— 国外流量直连还不易察觉。
-# timeout=5：经代理访问 gstatic，2s 太紧，网络一抖就整组误判不可用。
-# 正则排除机场的信息节点（剩余流量/官网之类），它们不是可用代理。
-AUTO_URL_TEST = (
-    f"{AUTO_GROUP} = url-test,url=http://www.gstatic.com/generate_204,"
-    "interval=300,tolerance=50,timeout=5,"
-    "policy-regex-filter=^(?!.*(直连|剩余|流量|官网|试用|到期)).*$"
+# ♻️ 自动：单层 fallback，直接对全部节点做可用性测试。
+# 不能嵌套地区组：Shadowrocket 只测当前生效的策略链，fallback 切换时
+# 不会触发子组重新测速，非生效子组永远"不可用"，最后静默落到 DIRECT。
+# 选 fallback 而不是 url-test：便宜机场节点 churn 高、约半数不可用，
+# 目标是"永远能用"而不是"永远最快"——fallback 挑订阅顺序里第一个活的，
+# 当前节点不死就不换，IP 变动最少，对风控最友好。
+# interval=120/timeout=1：死节点多，快速测完一轮、快速自愈。
+# 正则排除机场的信息节点（剩余流量/官网/备用之类），它们不是可用代理，
+# 还往往排在订阅第一位，不排除的话冷启动大概率选中死节点。
+AUTO_GROUP_LINE = (
+    f"{AUTO_GROUP} = fallback,url=http://www.gstatic.com/generate_204,"
+    "interval=120,timeout=1,"
+    "policy-regex-filter=^(?!.*(直连|剩余|流量|官网|试用|到期|备用|测试|体验|重置|过期)).*$"
 )
 SPOTIFY_GROUP = "🎧 Spotify = select,DIRECT,🚀 节点选择,🇺🇸 美国节点,policy-select-name=DIRECT"
 SPOTIFY_RULESET = (
@@ -219,8 +222,8 @@ def patch_url_test_tuning(text: str) -> str:
 def _region_groups(text: str) -> list[str]:
     """按出现顺序取出所有 url-test 地区组的组名。
 
-    要排除 ♻️ 自动 自身：它也是 url-test 组，二次跑 overlay 时会混进来，
-    幂等性就破了。
+    要排除 ♻️ 自动 自身：它若改回 url-test 类型，二次跑 overlay 时
+    会把自己混进地区组列表，幂等性就破了。
     """
     start, end = _section_bounds(text, "Proxy Group")
     names = [
@@ -234,7 +237,7 @@ def _region_groups(text: str) -> list[str]:
 
 
 def patch_select_and_auto(text: str) -> str:
-    """节点选择默认走 ♻️ 自动；♻️ 自动是单层 url-test，直接测全部节点。
+    """节点选择默认走 ♻️ 自动；♻️ 自动是单层 fallback，直接对全部节点测活。
 
     用户的节点自动化目标是"只管开关、不选节点"。
     """
@@ -243,7 +246,7 @@ def patch_select_and_auto(text: str) -> str:
         "🚀 节点选择 = select," + AUTO_GROUP + ",PROXY,DIRECT,REJECT,"
         + ",".join(regions) + f",policy-select-name={AUTO_GROUP}"
     )
-    auto = AUTO_URL_TEST
+    auto = AUTO_GROUP_LINE
 
     new, n = _sub_in_section(
         text, "Proxy Group", r"(?m)^🚀 节点选择\s*=.*$", lambda _: select, count=1
@@ -418,7 +421,7 @@ def verify(text: str) -> None:
         f"update-url = {FORK_CONF_URL}",
         "FINAL,",
         "GEOIP,CN,",
-        AUTO_GROUP + " = url-test,",
+        AUTO_GROUP + " = fallback,",
         "🇨🇳 台湾节点 =",
     ]
     for token in required:
